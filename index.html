@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>道路與號誌數據採集系統</title>
+  
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body, html { width: 100%; height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #f8f9fa; }
+    
+    #map { 
+      width: 100vw; 
+      height: 100vh; 
+      cursor: crosshair; 
+      will-change: transform;
+      transform: translateZ(0);
+    }
+
+    .user-location-marker {
+      display: flex; align-items: center; justify-content: center; transition: transform 0.08s linear;
+    }
+
+    .controls {
+      position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; gap: 12px;
+    }
+
+    .btn {
+      padding: 14px 28px; font-size: 16px; font-weight: bold; color: white; background-color: #007bff; border: none; border-radius: 30px; box-shadow: 0 4px 15px rgba(0,0,0,0.25); cursor: pointer; outline: none; transition: all 0.2s;
+    }
+    .btn:active { transform: scale(0.95); }
+    .btn.recording { background-color: #0056b3; box-shadow: 0 0 15px rgba(0, 123, 255, 0.6); }
+    .btn.stopping { background-color: #dc3545; box-shadow: 0 0 15px rgba(220, 53, 69, 0.6); }
+
+    .map-notice-bar {
+      position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.85); color: white; padding: 12px 24px;
+      border-radius: 30px; font-size: 15px; font-weight: bold; z-index: 3000;
+      display: none; align-items: center; gap: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    }
+    .btn-finish-map {
+      background: #28a745; color: white; border: none; padding: 6px 16px; border-radius: 20px; font-size: 14px; cursor: pointer;
+    }
+
+    /* 頂部非阻擋式 Toast 提示 */
+    .toast-msg {
+      position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+      background: rgba(33, 37, 41, 0.9); color: #fff; padding: 10px 20px;
+      border-radius: 25px; font-size: 14px; font-weight: bold; z-index: 4000;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3); opacity: 0; transition: opacity 0.3s ease; pointer-events: none;
+    }
+    .toast-msg.show { opacity: 1; }
+
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.6); display: none; justify-content: center; align-items: center; z-index: 2000; padding: 15px;
+    }
+    .modal-card {
+      background: white; width: 100%; max-width: 440px; padding: 22px; border-radius: 18px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); max-height: 85vh; overflow-y: auto;
+    }
+    .modal-card h3 { margin-bottom: 15px; font-size: 18px; color: #222; text-align: center; }
+    .form-group { margin-bottom: 14px; }
+    .form-group label { display: block; font-size: 14px; font-weight: bold; margin-bottom: 6px; color: #444; }
+    .form-group select, .form-group input, .form-group textarea {
+      width: 100%; padding: 10px 12px; font-size: 15px; border: 1px solid #ccc; border-radius: 8px; outline: none; font-family: inherit;
+    }
+    .radio-group { display: flex; gap: 15px; margin-top: 5px; }
+    .radio-group label { font-weight: normal; cursor: pointer; }
+    .modal-actions { display: flex; gap: 10px; margin-top: 20px; }
+    .modal-actions button {
+      flex: 1; padding: 12px; border: none; border-radius: 10px; font-size: 15px; font-weight: bold; cursor: pointer;
+    }
+    .btn-save { background: #28a745; color: white; }
+    .btn-cancel { background: #e0e0e0; color: #333; }
+    .sub-lane-box { background: #f1f3f5; padding: 10px; border-radius: 8px; margin-top: 8px; display: none; }
+
+    .segment-card {
+      background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 10px; padding: 12px; margin-bottom: 12px;
+    }
+    .segment-card.invalid-field {
+      border: 2px solid #dc3545; background: #fff5f5;
+    }
+    .segment-title { font-size: 14px; font-weight: bold; color: #007bff; margin-bottom: 8px; }
+    .required-tag { color: #dc3545; font-size: 12px; margin-left: 4px; }
+    
+    .custom-location-box {
+      background: #f8f9fa; border: 1px solid #ced4da; padding: 12px; border-radius: 10px; margin-bottom: 15px;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="toast" class="toast-msg"></div>
+
+  <div id="mapNoticeBar" class="map-notice-bar">
+    <span id="noticeText">📍 請點擊地圖標記補充紅綠燈...</span>
+    <button class="btn-finish-map" id="finishMapPickBtn">確定完成補充</button>
+  </div>
+
+  <div id="map"></div>
+  
+  <div class="controls">
+    <button id="recordBtn" class="btn">開始紀錄</button>
+  </div>
+
+  <!-- 隱私條款 Modal -->
+  <div id="privacyModal" class="modal-overlay" style="display: flex;">
+    <div class="modal-card">
+      <h3>🔒 定位權限與隱私聲明</h3>
+      <p style="font-size: 14px; color: #555; line-height: 1.6; margin-bottom: 15px;">
+        歡迎使用道路與號誌數據採集系統。<br>
+        本系統<b>僅會偵測與回傳您的即時定位與號誌採集數據</b>，絕不會收集任何個人隱私資訊，請安心授權定位權限以繼續使用。
+      </p>
+      <div class="modal-actions">
+        <button class="btn-save" id="grantPermissionBtn">同意並開啟定位</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 新增號誌 Modal -->
+  <div id="addLightModal" class="modal-overlay">
+    <div class="modal-card">
+      <h3>🚥 快速標記號誌點</h3>
+      <div class="form-group">
+        <label>號誌編號</label>
+        <input type="text" id="lightName" readonly style="background-color: #e9ecef; font-weight: bold; color: #007bff;">
+      </div>
+      <div class="form-group">
+        <label>前進／面向方位</label>
+        <select id="lightDirection">
+          <option value="北">北</option><option value="東北">東北</option>
+          <option value="東">東</option><option value="東南">東南</option>
+          <option value="南">南</option><option value="西南">西南</option>
+          <option value="西">西</option><option value="西北">西北</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>主燈號秒數 (秒)</label>
+        <input type="number" id="mainLightSec" value="30" placeholder="30">
+      </div>
+      <div class="form-group">
+        <label>左轉專用道紅綠燈</label>
+        <div class="radio-group">
+          <label><input type="radio" name="leftLane" value="no" checked onclick="toggleSubLane('leftSub', false)"> 無</label>
+          <label><input type="radio" name="leftLane" value="yes" onclick="toggleSubLane('leftSub', true)"> 有</label>
+        </div>
+        <div id="leftSub" class="sub-lane-box">
+          <label style="font-size:12px;">左轉燈秒數 (秒)</label>
+          <input type="number" id="leftLightSec" placeholder="請輸入秒數">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>右轉專用道紅綠燈</label>
+        <div class="radio-group">
+          <label><input type="radio" name="rightLane" value="no" checked onclick="toggleSubLane('rightSub', false)"> 無</label>
+          <label><input type="radio" name="rightLane" value="yes" onclick="toggleSubLane('rightSub', true)"> 有</label>
+        </div>
+        <div id="rightSub" class="sub-lane-box">
+          <label style="font-size:12px;">右轉燈秒數 (秒)</label>
+          <input type="number" id="rightLightSec" placeholder="請輸入秒數">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-cancel" onclick="closeModal('addLightModal')">取消</button>
+        <button class="btn-save" id="saveLightBtn">儲存標記</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 結束總結 Modal -->
+  <div id="summaryModal" class="modal-overlay">
+    <div class="modal-card">
+      <h3>📋 紀錄結束：收集者名稱與區域確認</h3>
+      
+      <!-- 收集者自訂命名區 -->
+      <div class="custom-location-box">
+        <div class="form-group">
+          <label>👤 收集者暱稱 / 姓名<span class="required-tag">*</span></label>
+          <input type="text" id="collectorName" placeholder="例如：小明 / 採集員01">
+        </div>
+        <div style="display: flex; gap: 10px;">
+          <div class="form-group" style="flex: 1; margin-bottom:0;">
+            <label>🏙️ 縣市<span class="required-tag">*</span></label>
+            <input type="text" id="customCity" placeholder="例：臺北市 / 高雄市">
+          </div>
+          <div class="form-group" style="flex: 1; margin-bottom:0;">
+            <label>📍 區域<span class="required-tag">*</span></label>
+            <input type="text" id="customDistrict" placeholder="例：大安區 / 左營區">
+          </div>
+        </div>
+      </div>
+
+      <div style="background: #eef5ff; border: 1px solid #b6d4fe; padding: 12px; border-radius: 12px; margin-bottom: 15px;">
+        <label style="font-weight:bold; font-size:14px; color:#0d6efd;">➕ 選擇區間補充紅綠燈</label>
+        <div class="form-group" style="margin-top:8px;">
+          <select id="pairSelect">
+            <option value="">-- 請選擇要補充的號誌區間 --</option>
+          </select>
+        </div>
+        <button type="button" class="btn-save" style="width:100%; padding:8px; font-size:14px;" id="startPickOnMapBtn">前往地圖標記點位</button>
+      </div>
+
+      <div class="form-group">
+        <label>✍️ 修改路口名稱與方位<span class="required-tag">*(必填)*</span></label>
+        <div id="lightEditContainer"></div>
+      </div>
+
+      <div class="form-group">
+        <label>當前採集時段</label>
+        <select id="timePeriod" onchange="renderSegmentEvaluations()">
+          <option value="morning">早上</option>
+          <option value="afternoon">下午</option>
+          <option value="night">晚上</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>🛣️ 各路段環境評估</label>
+        <div id="segmentContainer"></div>
+      </div>
+
+      <div class="form-group">
+        <label>道路備註說明</label>
+        <textarea id="roadRemark" rows="2" placeholder="例：XX路口凹凸不平、施工中..."></textarea>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn-save" id="submitSummaryBtn">確定上傳資料</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Leaflet & Supabase JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <script>
+    const SUPABASE_URL = "https://pzwxgjelbmelqjwedzqx.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_4sOGxV0FkFLH96ztvZFhhA_RvCJZwej";
+    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    const DEFAULT_ZOOM = 18;
+    const map = L.map('map', { zoomControl: true, maxZoom: 21, preferCanvas: true }).setView([23.6, 120.9], 7);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 21, maxNativeZoom: 19, attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    let recordState = 'idle';
+    let currentHeading = 0;
+    let currentLatLng = null;
+    let userMarker = null;
+    let clickedLatLng = null;
+    let stopTimer = null;
+
+    let lightMarkers = [];
+    let pointCounter = 1;
+    let isSuppMode = false;
+    let tempSuppPoints = [];
+
+    let toastTimer = null;
+    function showToast(text) {
+      const toast = document.getElementById('toast');
+      toast.innerText = text;
+      toast.classList.add('show');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        toast.classList.remove('show');
+      }, 3000);
+    }
+
+    const sectorSvg = `<svg width="60" height="60" viewBox="0 0 60 60"><path d="M 30 30 L 4 4 A 30 30 0 0 1 56 4 Z" fill="#007bff" fill-opacity="0.35" /><circle cx="30" cy="30" r="7" fill="#007bff" stroke="#ffffff" stroke-width="2.5" /></svg>`;
+    const blueArrowSvg = `<svg width="40" height="40" viewBox="0 0 40 40"><path d="M 20 4 L 32 34 L 20 27 L 8 34 Z" fill="#007bff" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"/></svg>`;
+    const redArrowSvg = `<svg width="40" height="40" viewBox="0 0 40 40"><path d="M 20 4 L 32 34 L 20 27 L 8 34 Z" fill="#dc3545" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"/></svg>`;
+
+    function createCustomIcon(state, heading) {
+      let svg = (state === 'recording') ? blueArrowSvg : (state === 'stopped') ? redArrowSvg : sectorSvg;
+      let size = (state === 'idle') ? [60, 60] : [40, 40];
+      let anchor = (state === 'idle') ? [30, 30] : [20, 20];
+      return L.divIcon({
+        html: `<div style="transform: rotate(${heading}deg); width:100%; height:100%; display:flex; align-items:center; justify-content:center;">${svg}</div>`,
+        className: 'user-location-marker', iconSize: size, iconAnchor: anchor
+      });
+    }
+
+    function headingToDirText(heading) {
+      const dirs = ['北', '東北', '東', '東南', '南', '西南', '西', '西北'];
+      return dirs[Math.round(heading / 45) % 8];
+    }
+
+    function updateUserMarker(lat, lng) {
+      currentLatLng = [lat, lng];
+      const icon = createCustomIcon(recordState, currentHeading);
+      if (!userMarker) {
+        userMarker = L.marker([lat, lng], { icon }).addTo(map);
+        map.flyTo([lat, lng], DEFAULT_ZOOM, { animate: true, duration: 0.5 });
+      } else {
+        userMarker.setLatLng([lat, lng]);
+        userMarker.setIcon(icon);
+        if (!isSuppMode) map.panTo([lat, lng], { animate: true, duration: 0.3 });
+      }
+    }
+
+    function handleOrientation(e) {
+      let heading = e.webkitCompassHeading || (e.alpha !== null ? (360 - e.alpha) % 360 : null);
+      if (heading !== null) {
+        currentHeading = Math.round(heading);
+        if (userMarker) userMarker.setIcon(createCustomIcon(recordState, currentHeading));
+      }
+    }
+
+    document.getElementById('grantPermissionBtn').addEventListener('click', () => {
+      closeModal('privacyModal');
+      if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        DeviceOrientationEvent.requestPermission().then(res => {
+          if (res === 'granted') window.addEventListener('deviceorientation', handleOrientation, true);
+        }).catch(console.error);
+      } else {
+        window.addEventListener('deviceorientationabsolute', handleOrientation, true) ||
+        window.addEventListener('deviceorientation', handleOrientation, true);
+      }
+      if ('geolocation' in navigator) {
+        navigator.geolocation.watchPosition(
+          pos => updateUserMarker(pos.coords.latitude, pos.coords.longitude),
+          err => showToast('無法讀取 GPS 定位。'),
+          { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+        );
+      }
+    });
+
+    // 地圖點擊限制邏輯
+    map.on('click', (e) => {
+      // 1. 如果在補充模式下，允許點擊地圖補充
+      if (isSuppMode) {
+        const suppMarker = L.marker(e.latlng).addTo(map).bindPopup("📍 補充點").openPopup();
+        tempSuppPoints.push({ latlng: e.latlng, markerObj: suppMarker });
+        document.getElementById('noticeText').innerText = `📍 已新增 ${tempSuppPoints.length} 個補充點，點擊完成返回...`;
+        return;
+      }
+
+      // 2. 未點擊「開始紀錄」前靜默忽略點擊（不跳提醒視窗）
+      if (recordState !== 'recording') {
+        return;
+      }
+
+      // 3. 紀錄進行中才打開紅綠燈表單
+      clickedLatLng = e.latlng;
+      document.getElementById('lightName').value = `${pointCounter}`;
+      document.getElementById('lightDirection').value = headingToDirText(currentHeading);
+      openModal('addLightModal');
+    });
+
+    function toggleSubLane(elementId, show) {
+      document.getElementById(elementId).style.display = show ? 'block' : 'none';
+    }
+
+    document.getElementById('saveLightBtn').addEventListener('click', () => {
+      const name = `${pointCounter}`;
+      const dir = document.getElementById('lightDirection').value;
+      const mainSec = document.getElementById('mainLightSec').value || 30;
+      
+      const hasLeft = document.querySelector('input[name="leftLane"]:checked').value === 'yes';
+      const leftSec = hasLeft ? (document.getElementById('leftLightSec').value || '未填') : '無';
+
+      const hasRight = document.querySelector('input[name="rightLane"]:checked').value === 'yes';
+      const rightSec = hasRight ? (document.getElementById('rightLightSec').value || '未填') : '無';
+
+      if (clickedLatLng) {
+        const mk = L.marker(clickedLatLng).addTo(map).bindPopup(`
+          <div style="font-size:13px; line-height:1.6;">
+            <b>🚥 編號：${name} (待校對)</b><br>
+            • 方位：${dir}向<br>
+            • 主燈秒數：${mainSec} 秒
+          </div>
+        `).openPopup();
+
+        lightMarkers.push({
+          id: Date.now(),
+          code: name,
+          name: name,
+          latlng: { lat: clickedLatLng.lat, lng: clickedLatLng.lng },
+          dir: dir,
+          mainSec: mainSec,
+          leftSec: leftSec,
+          rightSec: rightSec,
+          markerObj: mk
+        });
+
+        pointCounter++;
+      }
+
+      closeModal('addLightModal');
+    });
+
+    const recordBtn = document.getElementById('recordBtn');
+    recordBtn.addEventListener('click', () => {
+      if (recordState === 'idle') {
+        recordState = 'recording';
+        recordBtn.innerText = '紀錄中 (點擊結束)';
+        recordBtn.className = 'btn recording';
+        showToast("▶️ 已開始紀錄！請點擊地圖標記號誌");
+        if (currentLatLng) map.flyTo(currentLatLng, DEFAULT_ZOOM, { animate: true, duration: 0.5 });
+
+      } else if (recordState === 'recording') {
+        if (lightMarkers.length === 0) {
+          showToast("⚠️ 請先點擊地圖標記至少 1 個號誌點");
+          return;
+        }
+
+        recordState = 'stopped';
+        recordBtn.innerText = '結束中...';
+        recordBtn.className = 'btn stopping';
+
+        if (userMarker) userMarker.setIcon(createCustomIcon('stopped', currentHeading));
+        if (stopTimer) clearTimeout(stopTimer);
+        stopTimer = setTimeout(() => {
+          recordState = 'idle';
+          recordBtn.innerText = '開始紀錄';
+          recordBtn.className = 'btn';
+          if (userMarker) userMarker.setIcon(createCustomIcon('idle', currentHeading));
+        }, 3000);
+
+        setupSummaryModal();
+        openModal('summaryModal');
+      }
+    });
+
+    // 載入與預設地點 / 暱稱
+    async function setupSummaryModal() {
+      // 讀取暫存暱稱
+      const savedCollector = localStorage.getItem('collector_name') || '';
+      document.getElementById('collectorName').value = savedCollector;
+
+      // 嘗試自動帶入預設地點
+      if (!document.getElementById('customCity').value && lightMarkers.length > 0) {
+        const firstPt = lightMarkers[0].latlng;
+        try {
+          const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${firstPt.lat}&lon=${firstPt.lng}&accept-language=zh-TW`);
+          const data = await res.json();
+          if (data && data.address) {
+            document.getElementById('customCity').value = data.address.city || data.address.county || "";
+            document.getElementById('customDistrict').value = data.address.town || data.address.suburb || data.address.city_district || "";
+          }
+        } catch (e) {
+          console.error("Reverse geocode failed", e);
+        }
+      }
+
+      const pairSelect = document.getElementById('pairSelect');
+      pairSelect.innerHTML = '<option value="">-- 請選擇要補充的號誌區間 --</option>';
+
+      if (lightMarkers.length >= 2) {
+        for (let i = 0; i < lightMarkers.length - 1; i++) {
+          let A = lightMarkers[i].name;
+          let B = lightMarkers[i + 1].name;
+          pairSelect.innerHTML += `<option value="${i}">區間：${A} ➔ ${B}</option>`;
+        }
+      } else {
+        pairSelect.innerHTML = '<option value="">(需至少有 2 個號誌點才能選擇區間)</option>';
+      }
+
+      renderLightEditList();
+      renderSegmentEvaluations();
+    }
+
+    function renderLightEditList() {
+      const container = document.getElementById('lightEditContainer');
+      container.innerHTML = '';
+
+      lightMarkers.forEach((item, index) => {
+        const isPureNumber = /^\d+$/.test(item.name.trim());
+        const placeholderText = "例：XX路與XX路 / XX路與XX巷";
+
+        container.innerHTML += `
+          <div class="segment-card ${isPureNumber ? 'invalid-field' : ''}" id="editCard_${index}">
+            <div class="segment-title">📍 標記點 #${index + 1}（原始編號: ${item.code}）</div>
+            
+            <div class="form-group">
+              <label style="font-size:12px;">完整路口名稱<span class="required-tag">*</span></label>
+              <input type="text" 
+                     id="inputName_${index}" 
+                     class="light-name-input" 
+                     value="${isPureNumber ? '' : item.name}" 
+                     placeholder="${placeholderText}"
+                     oninput="updateSingleLightData(${index})">
+            </div>
+
+            <div class="form-group" style="margin-bottom:0;">
+              <label style="font-size:12px;">前進/面向方位</label>
+              <select id="inputDir_${index}" class="light-dir-input" onchange="updateSingleLightData(${index})">
+                <option value="北" ${item.dir==='北'?'selected':''}>北</option>
+                <option value="東北" ${item.dir==='東北'?'selected':''}>東北</option>
+                <option value="東" ${item.dir==='東'?'selected':''}>東</option>
+                <option value="東南" ${item.dir==='東南'?'selected':''}>東南</option>
+                <option value="南" ${item.dir==='南'?'selected':''}>南</option>
+                <option value="西南" ${item.dir==='西南'?'selected':''}>西南</option>
+                <option value="西" ${item.dir==='西'?'selected':''}>西</option>
+                <option value="西北" ${item.dir==='西北'?'selected':''}>西北</option>
+              </select>
+            </div>
+          </div>
+        `;
+      });
+    }
+
+    function updateSingleLightData(index) {
+      const val = document.getElementById(`inputName_${index}`).value.trim();
+      const dir = document.getElementById(`inputDir_${index}`).value;
+      const card = document.getElementById(`editCard_${index}`);
+
+      lightMarkers[index].name = val || lightMarkers[index].code;
+      lightMarkers[index].dir = dir;
+
+      const isPureNumber = /^\d+$/.test(val) || val === "";
+      if (isPureNumber) {
+        card.classList.add('invalid-field');
+      } else {
+        card.classList.remove('invalid-field');
+      }
+
+      updatePairSelectNames();
+      renderSegmentEvaluations();
+    }
+
+    function updatePairSelectNames() {
+      const pairSelect = document.getElementById('pairSelect');
+      const currentVal = pairSelect.value;
+      pairSelect.innerHTML = '<option value="">-- 請選擇要補充的號誌區間 --</option>';
+      if (lightMarkers.length >= 2) {
+        for (let i = 0; i < lightMarkers.length - 1; i++) {
+          let A = lightMarkers[i].name || `編號${lightMarkers[i].code}`;
+          let B = lightMarkers[i + 1].name || `編號${lightMarkers[i + 1].code}`;
+          pairSelect.innerHTML += `<option value="${i}">區間：${A} ➔ ${B}</option>`;
+        }
+        pairSelect.value = currentVal;
+      }
+    }
+
+    document.getElementById('startPickOnMapBtn').addEventListener('click', () => {
+      const idx = document.getElementById('pairSelect').value;
+      if (idx === "") {
+        showToast('請先選擇要補充紅綠燈的號誌區間！');
+        return;
+      }
+
+      closeModal('summaryModal');
+      isSuppMode = true;
+      tempSuppPoints = [];
+      document.getElementById('mapNoticeBar').style.display = 'flex';
+      document.getElementById('noticeText').innerText = `📍 請在地圖點擊要補充的位置...`;
+    });
+
+    document.getElementById('finishMapPickBtn').addEventListener('click', () => {
+      isSuppMode = false;
+      document.getElementById('mapNoticeBar').style.display = 'none';
+
+      const insertIdx = parseInt(document.getElementById('pairSelect').value) + 1;
+
+      tempSuppPoints.forEach((pt, i) => {
+        const suppCode = `${pointCounter}`;
+        lightMarkers.splice(insertIdx + i, 0, {
+          id: Date.now() + i,
+          code: suppCode,
+          name: suppCode,
+          latlng: { lat: pt.latlng.lat, lng: pt.latlng.lng },
+          dir: headingToDirText(currentHeading),
+          mainSec: 30,
+          leftSec: '無',
+          rightSec: '無',
+          markerObj: pt.markerObj
+        });
+        pointCounter++;
+      });
+
+      setupSummaryModal();
+      openModal('summaryModal');
+    });
+
+    function renderSegmentEvaluations() {
+      const container = document.getElementById('segmentContainer');
+      container.innerHTML = '';
+
+      if (lightMarkers.length < 2) {
+        container.innerHTML = '<div style="font-size:12px; color:#888;">需標記至少 2 個號誌方能形成路段評估</div>';
+        return;
+      }
+
+      const timeVal = document.getElementById('timePeriod').value;
+
+      for (let i = 0; i < lightMarkers.length - 1; i++) {
+        let nameA = lightMarkers[i].name || `編號${lightMarkers[i].code}`;
+        let nameB = lightMarkers[i + 1].name || `編號${lightMarkers[i + 1].code}`;
+        let segTitle = `路段 ${i + 1}：${nameA} ➔ ${nameB}`;
+        
+        let optionHtml = '';
+        if (timeVal === 'night') {
+          optionHtml = `
+            <div class="radio-group">
+              <label><input type="radio" name="seg_${i}" value="明亮" checked> 明亮</label>
+              <label><input type="radio" name="seg_${i}" value="昏暗"> 昏暗</label>
+            </div>`;
+        } else {
+          optionHtml = `
+            <div class="radio-group">
+              <label><input type="radio" name="seg_${i}" value="正常" checked> 視線正常</label>
+              <label><input type="radio" name="seg_${i}" value="陽光直射影響視線"> 陽光直射眩光</label>
+            </div>`;
+        }
+
+        container.innerHTML += `
+          <div class="segment-card">
+            <div class="segment-title">${segTitle}</div>
+            ${optionHtml}
+          </div>
+        `;
+      }
+    }
+
+    // 重設並寫入 Supabase 邏輯
+    document.getElementById('submitSummaryBtn').addEventListener('click', async () => {
+      const collectorName = document.getElementById('collectorName').value.trim();
+      const customCity = document.getElementById('customCity').value.trim();
+      const customDistrict = document.getElementById('customDistrict').value.trim();
+
+      if (!collectorName) {
+        showToast("❌ 請輸入【收集者暱稱 / 姓名】！");
+        return;
+      }
+      if (!customCity || !customDistrict) {
+        showToast("❌ 請完整輸入【縣市】與【區域】！");
+        return;
+      }
+
+      // 檢查是否皆填寫真實路口名稱
+      let uneditedList = [];
+      lightMarkers.forEach((item, idx) => {
+        const val = item.name.trim();
+        if (val === "" || /^\d+$/.test(val)) {
+          uneditedList.push(`標記點 #${idx + 1}`);
+        }
+      });
+
+      if (uneditedList.length > 0) {
+        showToast(`❌ 請先填寫標記點的真實路口名稱！`);
+        return;
+      }
+
+      localStorage.setItem('collector_name', collectorName);
+
+      const btn = document.getElementById('submitSummaryBtn');
+      btn.innerText = "寫入資料庫中...";
+      btn.disabled = true;
+
+      try {
+        // 打包路段評估
+        let segmentEvaluations = [];
+        for (let i = 0; i < lightMarkers.length - 1; i++) {
+          const evalVal = document.querySelector(`input[name="seg_${i}"]:checked`)?.value || '未評估';
+          segmentEvaluations.push({
+            segment: `${lightMarkers[i].name} -> ${lightMarkers[i+1].name}`,
+            status: evalVal
+          });
+        }
+
+        // 打包標記點
+        const cleanLightMarkers = lightMarkers.map(item => ({
+          code: item.code,
+          name: item.name,
+          dir: item.dir,
+          mainSec: item.mainSec,
+          leftSec: item.leftSec,
+          rightSec: item.rightSec,
+          latlng: item.latlng
+        }));
+
+        // 組裝包含 Supabase 後台顯示（中文）與系統使用（英文）的對應欄位
+        const payload = {
+          // 中文欄位（呈現於 Supabase Table Editor）
+          "路線名稱": `${customCity}${customDistrict} - ${collectorName}`,
+          "國家": "台灣",
+          "城市": customCity,
+          "區": customDistrict,
+
+          // 英文標準欄位
+          collector_name: collectorName,
+          custom_city: customCity,
+          custom_district: customDistrict,
+          time_period: document.getElementById('timePeriod').value,
+          road_remark: document.getElementById('roadRemark').value,
+          light_markers: cleanLightMarkers,
+          segment_evaluations: segmentEvaluations
+        };
+
+        const { error: recordErr } = await supabaseClient.from('road_records').insert([payload]);
+        if (recordErr) throw recordErr;
+
+        showToast(`🎉 上傳成功！`);
+        closeModal('summaryModal');
+      } catch (err) {
+        console.error(err);
+        showToast('❌ 上傳失敗：' + err.message);
+      } finally {
+        btn.innerText = "確定上傳資料";
+        btn.disabled = false;
+      }
+    });
+
+    function openModal(id) { document.getElementById(id).style.display = 'flex'; }
+    function closeModal(id) { document.getElementById(id).style.display = 'none'; }
+  </script>
+</body>
+</html>
